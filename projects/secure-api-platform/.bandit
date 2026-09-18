@@ -1,0 +1,2 @@
+[bandit]
+exclude = /usr/local/lib/python3.*/site-packages,./.venv,./tests

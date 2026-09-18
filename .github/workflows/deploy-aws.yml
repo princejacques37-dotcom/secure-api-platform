@@ -1,0 +1,99 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/secure-api-platform/**'
+      - '.github/workflows/deploy-aws.yml'
+      - '.github/workflows/secure-api-ci.yml'
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
+  ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+
+jobs:
+  security-gate:
+    uses: ./.github/workflows/secure-api-ci.yml
+
+  build-and-deploy:
+    needs: security-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push API image
+        working-directory: projects/secure-api-platform
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t "$REGISTRY/${ECR_API_REPOSITORY}:$GITHUB_SHA" .
+          docker push "$REGISTRY/${ECR_API_REPOSITORY}:$GITHUB_SHA"
+
+      - name: Build and push frontend image
+        working-directory: projects/secure-api-platform
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build --build-arg API_INTERNAL_URL=http://127.0.0.1:8000 \
+            -t "$REGISTRY/${ECR_FRONTEND_REPOSITORY}:$GITHUB_SHA" frontend
+          docker push "$REGISTRY/${ECR_FRONTEND_REPOSITORY}:$GITHUB_SHA"
+
+      - name: Render new ECS task definition
+        id: taskdef
+        run: |
+          TASK_DEF=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].taskDefinition' --output text)
+          aws ecs describe-task-definition --task-definition "$TASK_DEF" --query taskDefinition > taskdef.json
+          python - <<'PY'
+          import json, os
+          p='taskdef.json'
+          d=json.load(open(p))
+          d.pop('taskDefinitionArn', None); d.pop('revision', None); d.pop('status', None)
+          d.pop('requiresAttributes', None); d.pop('compatibilities', None); d.pop('registeredAt', None); d.pop('registeredBy', None)
+          reg=os.environ['REGISTRY'] if 'REGISTRY' in os.environ else None
+          sha=os.environ['GITHUB_SHA']
+          api_repo=os.environ['ECR_API_REPOSITORY']
+          fe_repo=os.environ['ECR_FRONTEND_REPOSITORY']
+          for c in d['containerDefinitions']:
+              if c['name']=='api': c['image']=f"{reg}/{api_repo}:{sha}"
+              if c['name']=='frontend': c['image']=f"{reg}/{fe_repo}:{sha}"
+          json.dump(d, open('rendered-taskdef.json','w'))
+          PY
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          GITHUB_SHA: ${{ github.sha }}
+          ECR_API_REPOSITORY: ${{ env.ECR_API_REPOSITORY }}
+          ECR_FRONTEND_REPOSITORY: ${{ env.ECR_FRONTEND_REPOSITORY }}
+
+      - name: Register and deploy
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://rendered-taskdef.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TASK_DEF_ARN" --desired-count 1
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"

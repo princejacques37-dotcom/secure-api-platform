@@ -1,0 +1,16 @@
+aws_region         = "eu-west-1"
+project_name       = "secure-api-platform"
+environment        = "prod"
+github_repository  = "YOUR_GITHUB_OWNER/YOUR_REPO"
+
+# Start with 0 for the first apply. After ECR images exist, set to 1.
+desired_count = 0
+
+# For a real domain + HTTPS:
+# domain_name          = "app.example.com"
+# acm_certificate_arn  = "arn:aws:acm:REGION:ACCOUNT:certificate/UUID"
+# route53_zone_id      = "ZXXXXXXXXXXXXX"
+
+enable_waf            = true
+db_multi_az           = false
+deletion_protection  = false

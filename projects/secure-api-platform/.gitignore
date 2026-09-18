@@ -1,0 +1,14 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+.venv/
+
+# Terraform
+infra/aws/.terraform/
+infra/aws/*.tfstate
+infra/aws/*.tfstate.*
+infra/aws/crash.log
+infra/aws/terraform.tfvars
+infra/aws/.terraform.lock.hcl
